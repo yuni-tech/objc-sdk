@@ -51,6 +51,7 @@ const UInt32 kQNDefaultDnsCacheTime = 2 * 60;
         _retryInterval = builder.retryInterval;
         _timeoutInterval = builder.timeoutInterval;
 
+        _delegate = builder.delegate;
         _recorder = builder.recorder;
         _recorderKeyGen = builder.recorderKeyGen;
 
@@ -108,6 +109,7 @@ const UInt32 kQNDefaultDnsCacheTime = 2 * 60;
         _timeoutInterval = 90;
         _retryInterval = 0.5;
 
+        _delegate = nil;
         _recorder = nil;
         _recorderKeyGen = nil;
 
