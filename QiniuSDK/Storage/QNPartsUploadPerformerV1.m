@@ -61,6 +61,9 @@
     }
     
     NSData *chunkData = [self getDataWithChunk:chunk block:block];
+    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:)]) {
+        chunkData = [self.config.delegate QNWillUploadChunkData:chunkData];
+    }
     if (chunkData == nil) {
         QNLogInfo(@"key:%@ get chunk data error", self.key);
         
