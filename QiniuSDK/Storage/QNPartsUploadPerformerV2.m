@@ -80,8 +80,8 @@
     
     // 本地读异常
     NSData *uploadData = [self getUploadData:data];
-    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:)]) {
-        uploadData = [self.config.delegate QNWillUploadChunkData:uploadData];
+    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:index:offset:)]) {
+        uploadData = [self.config.delegate QNWillUploadChunkData:uploadData index:data.index offset:data.offset];
     }
     if (uploadData == nil) {
         QNLogInfo(@"key:%@ get data error", self.key);
