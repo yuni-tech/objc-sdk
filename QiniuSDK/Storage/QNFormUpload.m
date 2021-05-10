@@ -53,8 +53,8 @@
     };
  
     NSData *fileData = self.data;
-    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:)]) {
-        fileData = [self.config.delegate QNWillUploadChunkData:fileData];
+    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:index:offset:)]) {
+        fileData = [self.config.delegate QNWillUploadChunkData:fileData index:0 offset:0];
     }
     [self.uploadTransaction uploadFormData:fileData
                                   fileName:self.fileName
