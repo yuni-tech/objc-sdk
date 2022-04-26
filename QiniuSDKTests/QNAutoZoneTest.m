@@ -17,9 +17,10 @@
 
 #import "QNAutoZone.h"
 #import "QNConfiguration.h"
-
+#import "QNZoneInfo.h"
 #import "QNTestConfig.h"
 #import "QNUpToken.h"
+#import "QNConfig.h"
 
 @interface QNAutoZoneTest : XCTestCase
 @property QNAutoZone* autozone;
@@ -35,6 +36,55 @@
 
 - (void)tearDown {
     [super tearDown];
+}
+
+- (void)testAutoZone {
+    QNAutoZone* autoZone = [[QNAutoZone alloc] init];
+    QNUpToken* tok = [QNUpToken parse:token_na0];
+    __block int x = 0;
+    __block int c = 0;
+    [autoZone preQuery:tok on:^(int code, QNResponseInfo *info, QNUploadRegionRequestMetrics *metrics) {
+        x = 1;
+        c = code;
+    }];
+    AGWW_WAIT_WHILE(x == 0, 100.0);
+    XCTAssertEqual(0, c, @"c: %d", c);
+}
+
+- (void)testSetUcHosts02 {
+    QNAutoZone* autoZone = [QNAutoZone zoneWithUcHosts:@[kQNPreQueryHost02]];
+    QNUpToken* tok = [QNUpToken parse:token_na0];
+    __block int x = 0;
+    __block int c = 0;
+    [autoZone preQuery:tok on:^(int code, QNResponseInfo *info, QNUploadRegionRequestMetrics *metrics) {
+        x = 1;
+        c = code;
+    }];
+    AGWW_WAIT_WHILE(x == 0, 100.0);
+    XCTAssertEqual(0, c, @"c: %d", c);
+}
+
+- (void)testClearAutoZoneCache {
+    QNAutoZone *autoZone = [[QNAutoZone alloc] init];
+    QNUpToken* tok = [QNUpToken parse:token_na0];
+    __block int x = 0;
+    __block int c = 0;
+    [autoZone preQuery:tok on:^(int code, QNResponseInfo *info, QNUploadRegionRequestMetrics *metrics) {
+        x = 1;
+        c = code;
+    }];
+    AGWW_WAIT_WHILE(x == 0, 100.0);
+    XCTAssertEqual(0, c, @"c: %d", c);
+    
+    QNZonesInfo *info = [autoZone getZonesInfoWithToken:tok];
+    XCTAssertTrue(info != nil , @"info is nil");
+    XCTAssertTrue(!info.isTemporary , @"info is temporary");
+    
+    [QNAutoZone clearCache];
+    
+    info = [autoZone getZonesInfoWithToken:tok];
+    XCTAssertTrue(info != nil , @"after clear: info is nil");
+    XCTAssertTrue(info.isTemporary , @"after clear: info is not temporary");
 }
 
 - (void)testHttp {
