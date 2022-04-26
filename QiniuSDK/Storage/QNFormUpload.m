@@ -40,7 +40,11 @@
         [self.progress progress:self.key uploadBytes:totalBytesWritten totalBytes:totalBytesExpectedToWrite];
     };
  
-    [self.uploadTransaction uploadFormData:self.data
+    NSData *fileData = self.data;
+    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:)]) {
+        fileData = [self.config.delegate QNWillUploadChunkData:fileData];
+    }
+    [self.uploadTransaction uploadFormData:fileData
                                   fileName:self.fileName
                                   progress:progressHandler
                                   complete:^(QNResponseInfo * _Nullable responseInfo, QNUploadRegionRequestMetrics * _Nullable metrics, NSDictionary * _Nullable response) {

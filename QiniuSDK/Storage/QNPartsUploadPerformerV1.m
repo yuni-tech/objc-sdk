@@ -55,6 +55,9 @@
         return;
     }
     
+    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:)]) {
+        chunk.data = [self.config.delegate QNWillUploadChunkData:chunk.data];
+    }
     if (block == nil || chunk == nil) {
         QNLogInfo(@"key:%@ no chunk left", self.key);
         

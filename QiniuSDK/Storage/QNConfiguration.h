@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #import "QNRecorderDelegate.h"
+#import "QNUploadDelegate.h"
 #import "QNDns.h"
 
 /**
@@ -109,6 +110,11 @@ typedef void (^QNConfigurationBuilderBlock)(QNConfigurationBuilder *builder);
  *  持久化记录接口，可以实现将记录持久化到文件，数据库等
  */
 @property (nonatomic, readonly) id<QNRecorderDelegate> recorder;
+
+/**
+ *  上传数据的处理回调等
+ */
+@property (nonatomic, readonly) id<QNUploadDelegate> delegate;
 
 /**
  *  为持久化上传记录，根据上传的key以及文件名 生成持久化的记录key
@@ -315,6 +321,11 @@ typedef void (^QNConfigurationBuilderBlock)(QNConfigurationBuilder *builder);
  *  持久化记录接口，可以实现将记录持久化到文件，数据库等
  */
 @property (nonatomic, strong) id<QNRecorderDelegate> recorder;
+
+/**
+ *  上传数据的处理回调等
+ */
+@property (nonatomic, weak) id<QNUploadDelegate> delegate;
 
 /**
  *  为持久化上传记录，根据上传的key以及文件名 生成持久化的记录key

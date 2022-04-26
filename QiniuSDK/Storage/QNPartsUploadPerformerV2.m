@@ -75,6 +75,9 @@
         return;
     }
     
+    if (self.config.delegate && [self.config.delegate respondsToSelector:@selector(QNWillUploadChunkData:)]) {
+        data.data = [self.config.delegate QNWillUploadChunkData:data.data];
+    }
     // 上传完毕
     if (data == nil) {
         QNLogInfo(@"key:%@ no data left", self.key);

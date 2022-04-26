@@ -117,7 +117,7 @@
        complete:(QNUpCompletionHandler)completionHandler
          option:(QNUploadOption *)option {
 
-    if ([QNUploadManager checkAndNotifyError:key token:token input:data complete:completionHandler]) {
+    if ([QNUploadManager checkAndNotifyError:key token:token input:data delegate:self.config.delegate complete:completionHandler]) {
         return;
     }
 
@@ -126,6 +126,7 @@
         QNResponseInfo *info = [QNResponseInfo responseInfoWithInvalidToken:@"invalid token"];
         [QNUploadManager complete:token
                               key:key
+                         delegate:self.config.delegate
                            source:data
                      responseInfo:info
                          response:nil
@@ -140,6 +141,7 @@
     QNUpTaskCompletionHandler complete = ^(QNResponseInfo *info, NSString *key, QNUploadTaskMetrics *metrics, NSDictionary *resp) {
         [QNUploadManager complete:token
                               key:key
+                         delegate:self.config.delegate
                            source:data
                      responseInfo:info
                          response:resp
@@ -167,7 +169,7 @@
               complete:(QNUpCompletionHandler)completionHandler
                 option:(QNUploadOption *)option {
     
-    if ([QNUploadManager checkAndNotifyError:key token:token input:inputStream complete:completionHandler]) {
+    if ([QNUploadManager checkAndNotifyError:key token:token input:inputStream delegate:self.config.delegate complete:completionHandler]) {
         return;
     }
 
@@ -183,7 +185,7 @@
        complete:(QNUpCompletionHandler)completionHandler
          option:(QNUploadOption *)option {
     
-    if ([QNUploadManager checkAndNotifyError:key token:token input:filePath complete:completionHandler]) {
+    if ([QNUploadManager checkAndNotifyError:key token:token input:filePath delegate:self.config.delegate complete:completionHandler]) {
         return;
     }
 
@@ -194,6 +196,7 @@
             QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
             [QNUploadManager complete:token
                                   key:key
+                             delegate:self.config.delegate
                                source:nil
                          responseInfo:info
                              response:nil
@@ -213,7 +216,7 @@
             option:(QNUploadOption *)option {
 #if __IPHONE_OS_VERSION_MIN_REQUIRED
     
-    if ([QNUploadManager checkAndNotifyError:key token:token input:asset complete:completionHandler]) {
+    if ([QNUploadManager checkAndNotifyError:key token:token input:asset delegate:self.config.delegate complete:completionHandler]) {
         return;
     }
 
@@ -224,6 +227,7 @@
             QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
             [QNUploadManager complete:token
                                   key:key
+                             delegate:self.config.delegate
                                source:nil
                          responseInfo:info
                              response:nil
@@ -244,7 +248,7 @@
             option:(QNUploadOption *)option {
 #if (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 90100)
     
-    if ([QNUploadManager checkAndNotifyError:key token:token input:asset complete:completionHandler]) {
+    if ([QNUploadManager checkAndNotifyError:key token:token input:asset delegate:self.config.delegate complete:completionHandler]) {
         return;
     }
 
@@ -255,6 +259,7 @@
             QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
             [QNUploadManager complete:token
                                   key:key
+                             delegate:self.config.delegate
                                source:nil
                          responseInfo:info
                              response:nil
@@ -274,7 +279,7 @@
                     option:(QNUploadOption *)option {
 #if (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 90000)
     
-    if ([QNUploadManager checkAndNotifyError:key token:token input:assetResource complete:completionHandler]) {
+    if ([QNUploadManager checkAndNotifyError:key token:token input:assetResource delegate:self.config.delegate complete:completionHandler]) {
         return;
     }
     @autoreleasepool {
@@ -284,6 +289,7 @@
             QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
             [QNUploadManager complete:token
                                   key:key
+                             delegate:self.config.delegate
                                source:nil
                          responseInfo:info
                              response:nil
@@ -319,6 +325,7 @@
             QNResponseInfo *info = [QNResponseInfo responseInfoWithInvalidToken:@"invalid token"];
             [QNUploadManager complete:token
                                   key:key
+                             delegate:self.config.delegate
                                source:source
                          responseInfo:info
                              response:nil
@@ -331,6 +338,7 @@
         QNUpTaskCompletionHandler complete = ^(QNResponseInfo *info, NSString *key, QNUploadTaskMetrics *metrics, NSDictionary *resp) {
             [QNUploadManager complete:token
                                   key:key
+                             delegate:self.config.delegate
                                source:source
                          responseInfo:info
                              response:resp
@@ -350,6 +358,7 @@
                 QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
                 [QNUploadManager complete:token
                                       key:key
+                                 delegate:self.config.delegate
                                    source:source
                              responseInfo:info
                                  response:nil
@@ -405,6 +414,7 @@
 + (BOOL)checkAndNotifyError:(NSString *)key
                       token:(NSString *)token
                       input:(NSObject *)input
+                   delegate:(id<QNUploadDelegate>)delegate
                    complete:(QNUpCompletionHandler)completionHandler {
     if (completionHandler == nil) {
         @throw [NSException exceptionWithName:NSInvalidArgumentException
@@ -424,6 +434,7 @@
     if (info != nil) {
         [QNUploadManager complete:token
                               key:key
+                         delegate:delegate
                            source:nil
                      responseInfo:info
                          response:nil
@@ -437,6 +448,7 @@
 
 + (void)complete:(NSString *)token
              key:(NSString *)key
+        delegate:(id<QNUploadDelegate>)delegate
           source:(NSObject *)source
     responseInfo:(QNResponseInfo *)responseInfo
         response:(NSDictionary *)response
@@ -446,6 +458,9 @@
     [QNUploadManager reportQuality:key source:source responseInfo:responseInfo taskMetrics:taskMetrics token:token];
     
     QNAsyncRunInMain(^{
+        if (delegate && [delegate respondsToSelector:@selector(QNUploadDataDidFinish:key:resp:)]) {
+            [delegate QNUploadDataDidFinish:responseInfo key:key resp:response];
+        }
         if (completionHandler) {
             completionHandler(responseInfo, key, response);
         }
