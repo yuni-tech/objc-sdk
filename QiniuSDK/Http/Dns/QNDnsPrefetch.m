@@ -72,8 +72,10 @@
         if ([address respondsToSelector:@selector(ttlValue)] && [address ttlValue]) {
             dic[@"ttlValue"] = [address ttlValue];
         }
-        if ([address respondsToSelector:@selector(source)] && [address sourceValue]) {
+        if ([address respondsToSelector:@selector(sourceValue)] && [address sourceValue]) {
             dic[@"sourceValue"] = [address sourceValue];
+        } else {
+            dic[@"sourceValue"] = kQNDnsSourceCustom;
         }
         if ([address respondsToSelector:@selector(timestampValue)] && [address timestampValue]) {
             dic[@"timestampValue"] = [address timestampValue];
@@ -90,12 +92,22 @@
     }
 }
 
+/// 过了 ttl 时间则需要刷新
+- (BOOL)needRefresh{
+    if (!self.timestampValue || !self.ipValue || self.ipValue.length == 0) {
+        return NO;
+    }
+    NSTimeInterval currentTimestamp = [[NSDate date] timeIntervalSince1970];
+    return currentTimestamp > (self.timestampValue.doubleValue + self.ttlValue.doubleValue);
+}
+
+/// 只要在最大 ttl 时间内，即为有效
 - (BOOL)isValid{
     if (!self.timestampValue || !self.ipValue || self.ipValue.length == 0) {
         return NO;
     }
     NSTimeInterval currentTimestamp = [[NSDate date] timeIntervalSince1970];
-    return currentTimestamp > self.timestampValue.doubleValue + self.ttlValue.doubleValue;
+    return currentTimestamp < (self.timestampValue.doubleValue + kQNGlobalConfiguration.dnsCacheMaxTTL);
 }
 
 - (NSString *)toJsonInfo{
@@ -147,29 +159,62 @@
 }
 - (NSString *)sourceValue{
     if (self.source == QNRecordSourceSystem) {
-        return @"system";
-    } else if (self.source == QNRecordSourceDnspodFree || self.source == QNRecordSourceDnspodEnterprise) {
-        return @"httpdns";
+        return kQNDnsSourceSystem;
+    } else if (self.source == QNRecordSourceDoh) {
+        return [NSString stringWithFormat:@"%@<%@>", kQNDnsSourceDoh, self.server];
+    } else if (self.source == QNRecordSourceUdp) {
+        return [NSString stringWithFormat:@"%@<%@>", kQNDnsSourceUdp, self.server];
+    } else if (self.source == QNRecordSourceDnspodEnterprise) {
+        return kQNDnsSourceDnspod;
+    } else if (self.ipValue == nil || self.ipValue.length == 0) {
+        return kQNDnsSourceNone;
     } else {
-        return @"none";
+        return kQNDnsSourceCustom;
     }
 }
 @end
 
-@interface QNDnsManager(DNS)<QNDnsDelegate>
+@interface QNInternalDns : NSObject
+@property(nonatomic, strong)id<QNDnsDelegate> dns;
+@property(nonatomic, strong)id<QNResolverDelegate> resolver;
 @end
-@implementation QNDnsManager(DNS)
-
-- (NSArray<id<QNIDnsNetworkAddress>> *)lookup:(NSString *)host{
-
-    return [self queryRecords:host];
+@implementation QNInternalDns
++ (instancetype)dnsWithDns:(id<QNDnsDelegate>)dns {
+    QNInternalDns *interDns = [[QNInternalDns alloc] init];
+    interDns.dns = dns;
+    return interDns;
 }
-
++ (instancetype)dnsWithResolver:(id<QNResolverDelegate>)resolver {
+    QNInternalDns *interDns = [[QNInternalDns alloc] init];
+    interDns.resolver = resolver;
+    return interDns;
+}
+- (NSArray < id <QNIDnsNetworkAddress> > *)lookup:(NSString *)host error:(NSError **)error {
+    if (self.dns) {
+        return [self.dns lookup:host];
+    } else if (self.resolver) {
+        NSArray <QNRecord *>* records = [self.resolver query:[[QNDomain alloc] init:host] networkInfo:nil error:error];
+        return [self filterRecords:records];
+    }
+    return nil;
+}
+- (NSArray <QNRecord *>*)filterRecords:(NSArray <QNRecord *>*)records {
+    NSMutableArray <QNRecord *> *newRecords = [NSMutableArray array];
+    for (QNRecord *record in records) {
+        if (record.type == kQNTypeA || record.type == kQNTypeAAAA) {
+            [newRecords addObject:record];
+        }
+    }
+    return [newRecords copy];
+}
 @end
 
 
 //MARK: -- DNS Prefetcher
 @interface QNDnsPrefetch()
+
+// dns 预解析超时，默认3s
+@property(nonatomic, assign)int dnsPrefetchTimeout;
 
 // 最近一次预取错误信息
 @property(nonatomic,  copy)NSString *lastPrefetchedErrorMessage;
@@ -179,11 +224,16 @@
 @property(nonatomic, strong)dispatch_semaphore_t getAutoZoneSemaphore;
 /// DNS信息本地缓存key
 @property(nonatomic, strong)QNDnsCacheInfo *dnsCacheInfo;
-/// happy的dns解析对象列表，会使用多个dns解析对象 包括系统解析
-@property(nonatomic, strong)QNDnsManager * httpDns;
+// 用户定制 dns
+@property(nonatomic, strong)QNInternalDns *customDns;
+// 系统 dns
+@property(nonatomic, strong)QNInternalDns *systemDns;
+/// prefetch hosts
+@property(nonatomic, strong)NSMutableSet *prefetchHosts;
 /// 缓存DNS解析结果
 /// 线程安全：内部方法均是在同一线程执行，读写不必加锁，对外开放接口读操作 需要和内部写操作枷锁
 @property(nonatomic, strong)NSMutableDictionary <NSString *, NSArray<QNDnsNetworkAddress *>*> *addressDictionary;
+@property(nonatomic, strong)QNDnsCacheFile *diskCache;
 
 @end
 
@@ -201,6 +251,7 @@
 - (instancetype)init{
     if (self = [super init]) {
         _isPrefetching = NO;
+        _dnsPrefetchTimeout = 3;
     }
     return self;
 }
@@ -242,8 +293,11 @@
     if ([self prepareToPreFetch] == NO) {
         return;
     }
-    
-    [self preFetchHosts:[self getLocalPreHost]];
+    NSArray *hosts = [self getLocalPreHost];
+    @synchronized (self) {
+        [self.prefetchHosts addObjectsFromArray:hosts];
+    }
+    [self preFetchHosts:hosts];
     [self recorderDnsCache];
     [self endPreFetch];
 }
@@ -253,7 +307,15 @@
     if ([self prepareToPreFetch] == NO) {
         return;
     }
-    [self preFetchHosts:[self getCurrentZoneHosts:currentZone token:token]];
+    NSArray *hosts = [self getCurrentZoneHosts:currentZone token:token];
+    if (hosts == nil) {
+        return;
+    }
+    
+    @synchronized (self) {
+        [self.prefetchHosts addObjectsFromArray:hosts];
+    }
+    [self preFetchHosts:hosts];
     [self recorderDnsCache];
     [self endPreFetch];
 }
@@ -262,7 +324,11 @@
     if ([self prepareToPreFetch] == NO) {
         return;
     }
-    [self preFetchHosts:[self.addressDictionary allKeys]];
+    NSArray *hosts = nil;
+    @synchronized (self) {
+        hosts = [self.prefetchHosts allObjects];
+    }
+    [self preFetchHosts:hosts];
     [self recorderDnsCache];
     [self endPreFetch];
 }
@@ -275,21 +341,84 @@
         return nil;
     }
     
+    [self clearDnsCacheIfNeeded];
+    
     NSArray <QNDnsNetworkAddress *> *addressList = nil;
     @synchronized (self) {
         addressList = self.addressDictionary[host];
     }
-    if (![addressList.firstObject isValid]) {
-        QNAsyncRun(^{
-            [[QNTransactionManager shared] setDnsCheckWhetherCachedValidTransactionAction];
-        });
+    
+    if (addressList && addressList.count > 0 && [addressList.firstObject isValid]) {
+        return addressList;
+    } else {
+        return nil;
     }
-    return addressList;
+}
+
+- (void)invalidNetworkAddressOfHost:(NSString *)host {
+    if (host == nil || host.length == 0) {
+        return;
+    }
+    @synchronized (self) {
+        [self.addressDictionary removeObjectForKey:host];
+    }
+}
+
+- (void)clearDnsCache:(NSError *__autoreleasing  _Nullable *)error {
+    [self clearDnsMemoryCache];
+    [self clearDnsDiskCache:error];
 }
 
 //MARK: --
 //MARK: -- 根据dns预取
-- (BOOL)prepareToPreFetch{
+- (NSString *)prefetchHostBySafeDns:(NSString *)host error:(NSError * __autoreleasing *)error {
+    if (host == nil) {
+        return nil;
+    }
+    
+    [self invalidNetworkAddressOfHost:host];
+    
+    NSError *err = nil;
+    NSArray *nextFetchHosts = @[host];
+    nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:self.customDns error:&err];
+    if (nextFetchHosts.count == 0) {
+        return [self getInetAddressByHost:host].firstObject.sourceValue;
+    }
+    
+    if (!kQNGlobalConfiguration.dohEnable) {
+        if (error != nil && err) {
+            *error = err;
+        }
+        return nil;
+    }
+    
+    QNDohResolver *dohResolver = [QNDohResolver resolverWithServers:kQNGlobalConfiguration.dohIpv4Servers recordType:kQNTypeA timeout:kQNGlobalConfiguration.dnsResolveTimeout];
+    QNInternalDns *doh = [QNInternalDns dnsWithResolver:dohResolver];
+    nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:doh error:&err];
+    if (nextFetchHosts.count == 0) {
+        return [self getInetAddressByHost:host].firstObject.sourceValue;
+    }
+    if (error != nil && err) {
+        *error = err;
+    }
+    
+    if ([QNIP isIpV6FullySupported]) {
+        QNDohResolver *dohResolver = [QNDohResolver resolverWithServers:kQNGlobalConfiguration.dohIpv6Servers recordType:kQNTypeA timeout:kQNGlobalConfiguration.dnsResolveTimeout];
+        QNInternalDns *doh = [QNInternalDns dnsWithResolver:dohResolver];
+        nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:doh error:&err];
+        if (error != nil && err) {
+            *error = err;
+        }
+    }
+    
+    if (nextFetchHosts.count == 0) {
+        return [self getInetAddressByHost:host].firstObject.sourceValue;
+    } else {
+        return nil;
+    }
+}
+
+- (BOOL)prepareToPreFetch {
     if ([self isDnsOpen] == NO) {
         return NO;
     }
@@ -300,12 +429,7 @@
         return NO;
     }
     
-    NSString *localIp = [QNIP local];
-    if (localIp == nil ||
-        (self.dnsCacheInfo && ![localIp isEqualToString:self.dnsCacheInfo.localIp])) {
-
-        [self clearPreHosts];
-    }
+    [self clearDnsCacheIfNeeded];
     
     self.isPrefetching = YES;
     return YES;
@@ -315,21 +439,61 @@
     self.isPrefetching = NO;
 }
 
-- (void)preFetchHosts:(NSArray <NSString *> *)fetchHosts{
-    
-    self.httpDns.defaultTtl = kQNGlobalConfiguration.dnsCacheTime;
-    
-    NSArray *nextFetchHosts = fetchHosts;
-    
-    nextFetchHosts = [self preFetchHosts:nextFetchHosts
-                                     dns:kQNGlobalConfiguration.dns];
-    
-    nextFetchHosts = [self preFetchHosts:nextFetchHosts
-                                     dns:self.httpDns];
+- (void)preFetchHosts:(NSArray <NSString *> *)fetchHosts {
+    NSError *err = nil;
+    [self preFetchHosts:fetchHosts error:&err];
+    self.lastPrefetchedErrorMessage = err.description;
 }
 
-- (NSArray *)preFetchHosts:(NSArray <NSString *> *)preHosts
-                       dns:(id <QNDnsDelegate>)dns{
+- (void)preFetchHosts:(NSArray <NSString *> *)fetchHosts error:(NSError **)error {
+    NSArray *nextFetchHosts = fetchHosts;
+    
+    // 定制
+    nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:self.customDns error:error];
+    if (nextFetchHosts.count == 0) {
+        return;
+    }
+    
+    // 系统
+    nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:self.systemDns error:error];
+    if (nextFetchHosts.count == 0) {
+        return;
+    }
+    
+    // doh
+    if (kQNGlobalConfiguration.dohEnable) {
+        QNDohResolver *dohResolver = [QNDohResolver resolverWithServers:kQNGlobalConfiguration.dohIpv4Servers recordType:kQNTypeA timeout:kQNGlobalConfiguration.dnsResolveTimeout];
+        QNInternalDns *doh = [QNInternalDns dnsWithResolver:dohResolver];
+        nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:doh error:error];
+        if (nextFetchHosts.count == 0) {
+            return;
+        }
+        
+        if ([QNIP isIpV6FullySupported]) {
+            QNDohResolver *dohResolver = [QNDohResolver resolverWithServers:kQNGlobalConfiguration.dohIpv6Servers recordType:kQNTypeA timeout:kQNGlobalConfiguration.dnsResolveTimeout];
+            QNInternalDns *doh = [QNInternalDns dnsWithResolver:dohResolver];
+            nextFetchHosts = [self preFetchHosts:nextFetchHosts dns:doh error:error];
+            if (nextFetchHosts.count == 0) {
+                return;
+            }
+        }
+    }
+    
+    // udp
+    if (kQNGlobalConfiguration.udpDnsEnable) {
+        QNDnsUdpResolver *udpDnsResolver = [QNDnsUdpResolver resolverWithServerIPs:kQNGlobalConfiguration.udpDnsIpv4Servers recordType:kQNTypeA timeout:kQNGlobalConfiguration.dnsResolveTimeout];
+        QNInternalDns *udpDns = [QNInternalDns dnsWithResolver:udpDnsResolver];
+        [self preFetchHosts:nextFetchHosts dns:udpDns error:error];
+        
+        if ([QNIP isIpV6FullySupported]) {
+            QNDnsUdpResolver *udpDnsResolver = [QNDnsUdpResolver resolverWithServerIPs:kQNGlobalConfiguration.udpDnsIpv6Servers recordType:kQNTypeA timeout:kQNGlobalConfiguration.dnsResolveTimeout];
+            QNInternalDns *udpDns = [QNInternalDns dnsWithResolver:udpDnsResolver];
+            [self preFetchHosts:nextFetchHosts dns:udpDns error:error];
+        }
+    }
+}
+
+- (NSArray *)preFetchHosts:(NSArray <NSString *> *)preHosts dns:(QNInternalDns *)dns error:(NSError **)error {
 
     if (!preHosts || preHosts.count == 0) {
         return nil;
@@ -339,13 +503,14 @@
         return [preHosts copy];
     }
     
+    int dnsRepreHostNum = kQNGlobalConfiguration.dnsRepreHostNum;
     NSMutableArray *failHosts = [NSMutableArray array];
     for (NSString *host in preHosts) {
         int rePreNum = 0;
         BOOL isSuccess = NO;
         
-        while (rePreNum < kQNGlobalConfiguration.dnsRepreHostNum) {
-            if ([self preFetchHost:host dns:dns]) {
+        while (rePreNum < dnsRepreHostNum) {
+            if ([self preFetchHost:host dns:dns error:error]) {
                 isSuccess = YES;
                 break;
             }
@@ -359,27 +524,24 @@
     return [failHosts copy];
 }
 
-- (BOOL)preFetchHost:(NSString *)preHost
-                 dns:(id <QNDnsDelegate>)dns{
+- (BOOL)preFetchHost:(NSString *)preHost dns:(QNInternalDns *)dns error:(NSError **)error {
     
     if (!preHost || preHost.length == 0) {
         return NO;
     }
     
-    NSArray<QNDnsNetworkAddress *>* preAddressList = self.addressDictionary[preHost];
-    if (preAddressList && [preAddressList.firstObject isValid]) {
+    NSDictionary *addressDictionary = self.addressDictionary;
+    NSArray<QNDnsNetworkAddress *>* preAddressList = addressDictionary[preHost];
+    if (preAddressList && ![preAddressList.firstObject needRefresh]) {
         return YES;
     }
     
-    NSArray <id <QNIDnsNetworkAddress> > * addressList = [dns lookup:preHost];
+    NSArray <id <QNIDnsNetworkAddress> > * addressList = [dns lookup:preHost error:error];
     if (addressList && addressList.count > 0) {
         NSMutableArray *addressListP = [NSMutableArray array];
         for (id <QNIDnsNetworkAddress>inetAddress in addressList) {
             QNDnsNetworkAddress *address = [QNDnsNetworkAddress inetAddress:inetAddress];
             if (address) {
-                if (dns == kQNGlobalConfiguration.dns) {
-                    address.sourceValue = @"customized";
-                }
                 address.hostValue = preHost;
                 if (!address.ttlValue) {
                     address.ttlValue = @(kQNDefaultDnsCacheTime);
@@ -406,7 +568,7 @@
         return NO;
     }
     
-    NSMutableDictionary *newAddressDictionary = [NSMutableDictionary dictionary];
+    NSMutableDictionary *records = [NSMutableDictionary dictionary];
     for (NSString *key in dataDic.allKeys) {
         NSArray *ips = dataDic[key];
         if ([ips isKindOfClass:[NSArray class]]) {
@@ -423,12 +585,12 @@
             }
             
             if (addressList.count > 0) {
-                newAddressDictionary[key] = [addressList copy];
+                records[key] = [addressList copy];
             }
         }
     }
     @synchronized (self) {
-        self.addressDictionary = newAddressDictionary;
+        [self.addressDictionary setValuesForKeysWithDictionary:records];
     }
     return NO;
 }
@@ -448,10 +610,11 @@
         return NO;
     }
     
+    NSDictionary *addressDictionary = self.addressDictionary;
     NSMutableDictionary *addressInfo = [NSMutableDictionary dictionary];
-    for (NSString *key in self.addressDictionary.allKeys) {
+    for (NSString *key in addressDictionary.allKeys) {
        
-        NSArray *addressModelList = self.addressDictionary[key];
+        NSArray *addressModelList = addressDictionary[key];
         NSMutableArray * addressDicList = [NSMutableArray array];
 
         for (QNDnsNetworkAddress *ipInfo in addressModelList) {
@@ -479,55 +642,29 @@
     return true;
 }
 
-- (void)clearPreHosts{
+- (void)clearDnsCacheIfNeeded{
+    NSString *localIp = [QNIP local];
+    if (localIp == nil || (self.dnsCacheInfo && ![localIp isEqualToString:self.dnsCacheInfo.localIp])) {
+        [self clearDnsMemoryCache];
+    }
+}
+
+- (void)clearDnsMemoryCache {
     @synchronized (self) {
         [self.addressDictionary removeAllObjects];
     }
 }
 
+- (void)clearDnsDiskCache:(NSError **)error {
+    [self.diskCache clearCache:error];
+}
+
 
 //MARK: -- 获取预取hosts
 - (NSArray <NSString *> *)getLocalPreHost{
-
     NSMutableArray *localHosts = [NSMutableArray array];
-    
-    NSArray *fixedHosts = [self getFixedZoneHosts];
-    [localHosts addObjectsFromArray:fixedHosts];
-    
-    [localHosts addObject:kQNPreQueryHost00];
-    [localHosts addObject:kQNPreQueryHost01];
-    
+    [localHosts addObject:kQNUpLogHost];
     return [localHosts copy];
-}
-
-- (NSArray <NSString *> *)getAllPreHost:(QNZone *)currentZone
-                                  token:(QNUpToken *)token{
-    
-    NSMutableSet *set = [NSMutableSet set];
-    NSMutableArray *fetchHosts = [NSMutableArray array];
-    
-    NSArray *fixedHosts = [self getFixedZoneHosts];
-    [fetchHosts addObjectsFromArray:fixedHosts];
-    
-    NSArray *autoHosts = [self getCurrentZoneHosts:currentZone token:token];
-    [fetchHosts addObjectsFromArray:autoHosts];
-    
-    [fetchHosts addObject:kQNPreQueryHost00];
-    [fetchHosts addObject:kQNPreQueryHost01];
-    
-    NSArray *cacheHost = [self getCacheHosts];
-    [fetchHosts addObjectsFromArray:cacheHost];
-    
-    NSMutableArray *fetchHostsFiltered = [NSMutableArray array];
-    for (NSString *host in fetchHosts) {
-        NSInteger countBeforeAdd = set.count;
-        [set addObject:host];
-        NSInteger countAfterAdd = set.count;
-        if (countBeforeAdd < countAfterAdd) {
-            [fetchHostsFiltered addObject:host];
-        }
-    }
-    return [fetchHostsFiltered copy];
 }
 
 - (NSArray <NSString *> *)getCurrentZoneHosts:(QNZone *)currentZone
@@ -551,20 +688,9 @@
     return [autoHosts copy];
 }
 
-- (NSArray <NSString *> *)getFixedZoneHosts{
-    NSMutableArray *localHosts = [NSMutableArray array];
-    QNFixedZone *fixedZone = [QNFixedZone localsZoneInfo];
-    QNZonesInfo *zonesInfo = [fixedZone getZonesInfoWithToken:nil];
-    for (QNZoneInfo *zoneInfo in zonesInfo.zonesInfo) {
-        if (zoneInfo.allHosts) {
-            [localHosts addObjectsFromArray:zoneInfo.allHosts];
-        }
-    }
-    return [localHosts copy];
-}
-
 - (NSArray <NSString *> *)getCacheHosts{
-    return self.addressDictionary.allKeys;
+    NSDictionary *addressDictionary = self.addressDictionary;
+    return [addressDictionary copy];
 }
 
 
@@ -593,23 +719,38 @@
     return _getAutoZoneSemaphore;
 }
 
-- (QNDnsManager *)httpDns{
-    if (_httpDns == nil) {
-        QNResolver *systemDnsresolver = [QNResolver systemResolver];
-        QNDnspodFree *dnspodFree = [[QNDnspodFree alloc] init];
-        QNDnsManager *httpDns = [[QNDnsManager alloc] init:@[systemDnsresolver, dnspodFree]
-                                               networkInfo:nil];
-        
-        kQNWeakSelf;
-        httpDns.queryErrorHandler = ^(NSError *error, NSString *host) {
-            kQNStrongSelf;
-            
-            self.lastPrefetchedErrorMessage = [error localizedDescription];
-        };
-        _httpDns = httpDns;
+- (QNDnsCacheFile *)diskCache {
+    if (!_diskCache) {
+        NSError *error;
+        QNDnsCacheFile *cache = [QNDnsCacheFile dnsCacheFile:kQNGlobalConfiguration.dnsCacheDir error:&error];
+        if (!error) {
+            _diskCache = cache;
+        }
     }
-    return _httpDns;
+    return _diskCache;
 }
+
+- (QNInternalDns *)customDns {
+    if (_systemDns == nil && kQNGlobalConfiguration.dns) {
+        _systemDns = [QNInternalDns dnsWithDns:kQNGlobalConfiguration.dns];
+    }
+    return _systemDns;
+}
+
+- (QNInternalDns *)systemDns {
+    if (_systemDns == nil) {
+        _systemDns = [QNInternalDns dnsWithResolver:[[QNResolver alloc] initWithAddress:nil timeout:self.dnsPrefetchTimeout]];
+    }
+    return _systemDns;
+}
+
+- (NSMutableSet *)prefetchHosts {
+    if (!_prefetchHosts) {
+        _prefetchHosts = [NSMutableSet set];
+    }
+    return _prefetchHosts;
+}
+
 @end
 
 
@@ -633,6 +774,7 @@
             [kQNDnsPrefetch localFetch];
         }];
         [[QNTransactionManager shared] addTransaction:transaction];
+        [self setDnsCheckWhetherCachedValidTransactionAction];
     });
 }
 
@@ -690,3 +832,23 @@
 }
 
 @end
+
+BOOL kQNIsDnsSourceDoh(NSString * _Nullable source) {
+    return [source containsString:kQNDnsSourceDoh];
+}
+
+BOOL kQNIsDnsSourceUdp(NSString * _Nullable source) {
+    return [source containsString:kQNDnsSourceUdp];
+}
+
+BOOL kQNIsDnsSourceDnsPod(NSString * _Nullable source) {
+    return [source containsString:kQNDnsSourceDnspod];
+}
+
+BOOL kQNIsDnsSourceSystem(NSString * _Nullable source) {
+    return [source containsString:kQNDnsSourceSystem];
+}
+
+BOOL kQNIsDnsSourceCustom(NSString * _Nullable source) {
+    return [source containsString:kQNDnsSourceCustom];
+}

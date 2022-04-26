@@ -35,27 +35,27 @@
     // 根据文件从本地恢复上传信息，如果没有则重新构建上传信息
     if (self.config.resumeUploadVersion == QNResumeUploadVersionV1) {
         QNLogInfo(@"key:%@ 分片V1", self.key);
-        self.uploadPerformer = [[QNPartsUploadPerformerV1 alloc] initWithFile:self.file
-                                                                     fileName:self.fileName
-                                                                          key:self.key
-                                                                        token:self.token
-                                                                       option:self.option
-                                                                configuration:self.config
-                                                                  recorderKey:self.recorderKey];
+        self.uploadPerformer = [[QNPartsUploadPerformerV1 alloc] initWithSource:self.uploadSource
+                                                                       fileName:self.fileName
+                                                                            key:self.key
+                                                                          token:self.token
+                                                                         option:self.option
+                                                                  configuration:self.config
+                                                                    recorderKey:self.recorderKey];
     } else {
         QNLogInfo(@"key:%@ 分片V2", self.key);
-        self.uploadPerformer = [[QNPartsUploadPerformerV2 alloc] initWithFile:self.file
-                                                                     fileName:self.fileName
-                                                                          key:self.key
-                                                                        token:self.token
-                                                                       option:self.option
-                                                                configuration:self.config
-                                                                  recorderKey:self.recorderKey];
+        self.uploadPerformer = [[QNPartsUploadPerformerV2 alloc] initWithSource:self.uploadSource
+                                                                       fileName:self.fileName
+                                                                            key:self.key
+                                                                          token:self.token
+                                                                         option:self.option
+                                                                  configuration:self.config
+                                                                    recorderKey:self.recorderKey];
     }
 }
 
 - (BOOL)isAllUploaded {
-    return [self.uploadPerformer.fileInfo isAllUploaded];
+    return [self.uploadPerformer.uploadInfo isAllUploaded];
 }
 
 - (void)setErrorResponseInfo:(QNResponseInfo *)responseInfo errorResponse:(NSDictionary *)response{
@@ -85,13 +85,18 @@
     }
     QNLogInfo(@"key:%@ region:%@", self.key, self.uploadPerformer.currentRegion.zoneInfo.regionId);
     
-    if (self.file == nil) {
+    if (self.uploadSource == nil) {
         code = kQNLocalIOError;
     }
     return code;
 }
 
 - (BOOL)switchRegion{
+    // 重新加载资源，如果加载失败，不可切换 region
+    if (![self.uploadPerformer couldReloadInfo] || ![self.uploadPerformer reloadInfo]) {
+        return false;
+    }
+    
     BOOL isSuccess = [super switchRegion];
     if (isSuccess) {
         [self.uploadPerformer switchRegion:self.getCurrentRegion];
@@ -141,7 +146,14 @@
                 return;
             }
             
-            QNLogInfo(@"key:%@ completeUpload", self.key);
+            // 只有再读取结束再能知道文件大小，需要检测
+            if ([self.uploadPerformer.uploadInfo getSourceSize] == 0) {
+                QNResponseInfo *responseInfo = [QNResponseInfo responseInfoOfZeroData:@"file is empty"];
+                [self complete:responseInfo response:responseInfo.responseDictionary];
+                return;
+            }
+            
+            QNLogInfo(@"key:%@ completeUpload errorResponseInfo:%@", self.key, self.uploadDataErrorResponseInfo);
             
             // 3. 组装文件
             kQNWeakSelf;
@@ -154,10 +166,6 @@
                     }
                     return;
                 }
-
-                QNAsyncRunInMain(^{
-                    self.option.progressHandler(self.key, 1.0);
-                 });
                 [self complete:responseInfo response:response];
             }];
         }];
@@ -237,12 +245,14 @@
 
 
 - (void)complete:(QNResponseInfo *)info response:(NSDictionary *)response{
-    [self reportBlock];
-    [self.file close];
+    [self.uploadSource close];
     if ([self shouldRemoveUploadInfoRecord:info]) {
         [self.uploadPerformer removeUploadInfoRecord];
     }
+    
     [super complete:info response:response];
+    
+    [self reportBlock];
 }
 
 - (BOOL)shouldRemoveUploadInfoRecord:(QNResponseInfo *)info {
@@ -264,10 +274,18 @@
     [item setReportValue:metrics.totalElapsedTime forKey:QNReportBlockKeyTotalElapsedTime];
     [item setReportValue:metrics.bytesSend forKey:QNReportBlockKeyBytesSent];
     [item setReportValue:self.uploadPerformer.recoveredFrom forKey:QNReportBlockKeyRecoveredFrom];
-    [item setReportValue:@(self.file.size) forKey:QNReportBlockKeyFileSize];
+    [item setReportValue:@([self.uploadSource getSize]) forKey:QNReportBlockKeyFileSize];
     [item setReportValue:@([QNUtils getCurrentProcessID]) forKey:QNReportBlockKeyPid];
     [item setReportValue:@([QNUtils getCurrentThreadID]) forKey:QNReportBlockKeyTid];
     
+    [item setReportValue:metrics.metricsList.lastObject.hijacked forKey:QNReportBlockKeyHijacking];
+    
+    // 统计当前 region 上传速度 文件大小 / 总耗时
+    if (self.uploadDataErrorResponseInfo == nil && [self.uploadSource getSize] > 0 && [metrics totalElapsedTime] > 0) {
+        NSNumber *speed = [QNUtils calculateSpeed:[self.uploadSource getSize] totalTime:[metrics totalElapsedTime].longLongValue];
+        [item setReportValue:speed forKey:QNReportBlockKeyPerceptiveSpeed];
+    }
+
     if (self.config.resumeUploadVersion == QNResumeUploadVersionV1) {
         [item setReportValue:@(1) forKey:QNReportBlockKeyUpApiVersion];
     } else {
@@ -281,6 +299,22 @@
     [item setReportValue:[QNUtils sdkVersion] forKey:QNReportBlockKeySDKVersion];
     
     [kQNReporter reportItem:item token:self.token.token];
+}
+
+- (NSString *)upType {
+    if (self.config == nil) {
+        return nil;
+    }
+    
+    NSString *sourceType = @"";
+    if ([self.uploadSource respondsToSelector:@selector(sourceType)]) {
+        sourceType = [self.uploadSource sourceType];
+    }
+    if (self.config.resumeUploadVersion == QNResumeUploadVersionV1) {
+        return [NSString stringWithFormat:@"%@<%@>",QNUploadUpTypeResumableV1, sourceType];
+    } else {
+        return [NSString stringWithFormat:@"%@<%@>",QNUploadUpTypeResumableV2, sourceType];
+    }
 }
 
 @end

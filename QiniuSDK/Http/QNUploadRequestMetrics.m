@@ -6,11 +6,39 @@
 //  Copyright © 2020 Qiniu. All rights reserved.
 //
 
+#import "QNUtils.h"
 #import "QNUploadRequestMetrics.h"
 #import "NSURLRequest+QNRequest.h"
 #import "QNZoneInfo.h"
 
+@interface QNUploadMetrics()
+
+@property (nullable, strong) NSDate *startDate;
+@property (nullable, strong) NSDate *endDate;
+
+@end
+@implementation QNUploadMetrics
+//MARK:-- 构造
++ (instancetype)emptyMetrics {
+    return [[self alloc] init];
+}
+
+- (NSNumber *)totalElapsedTime{
+    return [QNUtils dateDuration:self.startDate endDate:self.endDate];
+}
+
+- (void)start {
+    self.startDate = [NSDate date];
+}
+
+- (void)end {
+    self.endDate = [NSDate date];
+}
+@end
+
 @interface QNUploadSingleRequestMetrics()
+@property (nonatomic, assign) int64_t countOfRequestHeaderBytes;
+@property (nonatomic, assign) int64_t countOfRequestBodyBytes;
 @end
 @implementation QNUploadSingleRequestMetrics
 
@@ -39,10 +67,34 @@
                                                           timeoutInterval:request.timeoutInterval];
     newRequest.allHTTPHeaderFields = request.allHTTPHeaderFields;
     
-    NSInteger headerLength = [NSString stringWithFormat:@"%@", request.allHTTPHeaderFields].length;
-    NSInteger bodyLength = [request.qn_getHttpBody length];
-    _totalBytes = @(headerLength + bodyLength);
+    self.countOfRequestHeaderBytes = [NSString stringWithFormat:@"%@", request.allHTTPHeaderFields].length;
+    self.countOfRequestBodyBytes = [request.qn_getHttpBody length];
+    _totalBytes = @(self.countOfRequestHeaderBytes + self.countOfRequestBodyBytes);
     _request = [newRequest copy];
+}
+
+- (void)setResponse:(NSURLResponse *)response {
+    if ([response isKindOfClass:[NSHTTPURLResponse class]] &&
+        [(NSHTTPURLResponse *)response statusCode] >= 200 &&
+        [(NSHTTPURLResponse *)response statusCode] < 300) {
+        _countOfRequestHeaderBytesSent = _countOfRequestHeaderBytes;
+        _countOfRequestBodyBytesSent = _countOfRequestBodyBytes;
+    }
+    if (_countOfResponseBodyBytesReceived <= 0) {
+        _countOfResponseBodyBytesReceived = response.expectedContentLength;
+    }
+    if (_countOfResponseHeaderBytesReceived <= 0 && [response isKindOfClass:[NSHTTPURLResponse class]]) {
+        _countOfResponseHeaderBytesReceived = [NSString stringWithFormat:@"%@", [(NSHTTPURLResponse *)response allHeaderFields]].length;
+    }
+    _response = [response copy];
+}
+
+- (BOOL)isForsureHijacked {
+    return [self.hijacked isEqualToString:kQNMetricsRequestHijacked];
+}
+
+- (BOOL)isMaybeHijacked {
+    return [self.hijacked isEqualToString:kQNMetricsRequestMaybeHijacked];
 }
 
 - (NSNumber *)totalElapsedTime{
@@ -88,13 +140,18 @@
 }
 
 - (NSNumber *)timeFromStartDate:(NSDate *)startDate toEndDate:(NSDate *)endDate{
-    if (startDate && endDate) {
-        double time = [endDate timeIntervalSinceDate:startDate] * 1000;
-        return @(time);
-    } else {
+    return [QNUtils dateDuration:startDate endDate:endDate];
+}
+
+- (NSNumber *)perceptiveSpeed {
+    int64_t size = self.bytesSend.longLongValue + _countOfResponseHeaderBytesReceived + _countOfResponseBodyBytesReceived;
+    if (size == 0 || self.totalElapsedTime == nil) {
         return nil;
     }
+    
+    return [QNUtils calculateSpeed:size totalTime:self.totalElapsedTime.longLongValue];
 }
+
 @end
 
 
@@ -119,15 +176,9 @@
     return self;
 }
 
-- (NSNumber *)totalElapsedTime{
-    if (self.metricsList) {
-        double time = 0;
-        for (QNUploadSingleRequestMetrics *metrics in self.metricsList) {
-            time += metrics.totalElapsedTime.doubleValue;
-        }
-        return time > 0 ? @(time) : nil;
-    } else {
-        return nil;
+- (QNUploadSingleRequestMetrics *)lastMetrics {
+    @synchronized (self) {
+        return self.metricsListInter.lastObject;
     }
 }
 
@@ -176,7 +227,9 @@
 
 @interface QNUploadTaskMetrics()
 
-@property (nonatomic,   copy) NSMutableDictionary<NSString *, QNUploadRegionRequestMetrics *> *metricsInfo;
+@property (nonatomic,   copy) NSString *upType;
+@property (nonatomic,   copy) NSMutableArray<NSString *> *metricsKeys;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, QNUploadRegionRequestMetrics *> *metricsInfo;
 
 @end
 @implementation QNUploadTaskMetrics
@@ -186,13 +239,33 @@
     return metrics;
 }
 
++ (instancetype)taskMetrics:(NSString *)upType {
+    QNUploadTaskMetrics *metrics = [self emptyMetrics];
+    metrics.upType = upType;
+    return metrics;
+}
+
 - (instancetype)init{
     if (self = [super init]) {
+        _metricsKeys = [NSMutableArray array];
         _metricsInfo = [NSMutableDictionary dictionary];
     }
     return self;
 }
 
+- (QNUploadRegionRequestMetrics *)lastMetrics {
+    if (self.metricsKeys.count < 1) {
+        return nil;
+    }
+    
+    @synchronized (self) {
+        NSString *key = self.metricsKeys.lastObject;
+        if (key == nil) {
+            return nil;
+        }
+        return self.metricsInfo[key];
+    }
+}
 - (NSNumber *)totalElapsedTime{
     NSDictionary *metricsInfo = [self syncCopyMetricsInfo];
     if (metricsInfo) {
@@ -247,6 +320,11 @@
     }
 }
 
+- (void)setUcQueryMetrics:(QNUploadRegionRequestMetrics *)ucQueryMetrics {
+    _ucQueryMetrics = ucQueryMetrics;
+    [self addMetrics:ucQueryMetrics];
+}
+
 - (void)addMetrics:(QNUploadRegionRequestMetrics *)metrics{
     NSString *regionId = metrics.region.zoneInfo.regionId;
     if (!regionId) {
@@ -257,6 +335,7 @@
         if (metricsOld) {
             [metricsOld addMetrics:metrics];
         } else {
+            [self.metricsKeys addObject:regionId];
             self.metricsInfo[regionId] = metrics;
         }
     }

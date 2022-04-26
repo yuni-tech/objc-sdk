@@ -12,6 +12,7 @@
 #import "QNZoneInfo.h"
 #import "QNFixedZone.h"
 #import <XCTest/XCTest.h>
+#import <Photos/Photos.h>
 
 @interface QNUploadDomainRegionTest : XCTestCase
 

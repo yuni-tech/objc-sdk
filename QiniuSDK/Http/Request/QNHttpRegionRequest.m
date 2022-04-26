@@ -9,6 +9,7 @@
 #import "QNDefine.h"
 #import "QNLogUtil.h"
 #import "QNAsyncRun.h"
+#import "QNDnsPrefetch.h"
 #import "QNUploadRequestState.h"
 #import "QNHttpRegionRequest.h"
 #import "QNConfiguration.h"
@@ -61,6 +62,7 @@ shouldRetry:(BOOL(^)(QNResponseInfo *responseInfo, NSDictionary *response))shoul
    complete:(QNRegionRequestCompleteHandler)complete{
     
     self.requestMetrics = [[QNUploadRegionRequestMetrics alloc] initWithRegion:self.region];
+    [self.requestMetrics start];
     [self performRequest:[self getNextServer:nil]
                   action:action
                  headers:headers
@@ -79,6 +81,7 @@ shouldRetry:(BOOL(^)(QNResponseInfo *responseInfo, NSDictionary *response))shoul
     complete:(QNRegionRequestCompleteHandler)complete{
     
     self.requestMetrics = [[QNUploadRegionRequestMetrics alloc] initWithRegion:self.region];
+    [self.requestMetrics start];
     [self performRequest:[self getNextServer:nil]
                   action:action
                  headers:headers
@@ -98,6 +101,7 @@ shouldRetry:(BOOL(^)(QNResponseInfo *responseInfo, NSDictionary *response))shoul
    complete:(QNRegionRequestCompleteHandler)complete{
     
     self.requestMetrics = [[QNUploadRegionRequestMetrics alloc] initWithRegion:self.region];
+    [self.requestMetrics start];
     [self performRequest:[self getNextServer:nil]
                   action:action
                  headers:headers
@@ -134,22 +138,10 @@ shouldRetry:(BOOL(^)(QNResponseInfo *responseInfo, NSDictionary *response))shoul
     
     self.currentServer = server;
     
-    BOOL toSkipDns = NO;
     NSString *scheme = self.config.useHttps ? @"https://" : @"http://";
     NSMutableURLRequest *request = [[NSMutableURLRequest alloc] init];
-    if (serverIP && serverIP.length > 0) {
-        NSString *urlString = [NSString stringWithFormat:@"%@%@%@", scheme, serverIP, action ?: @""];
-        request.URL = [NSURL URLWithString:urlString];
-        request.qn_domain = serverHost;
-        request.qn_ip = serverIP;
-        toSkipDns = YES;
-    } else {
-        NSString *urlString = [NSString stringWithFormat:@"%@%@%@", scheme, serverHost, action ?: @""];
-        request.URL = [NSURL URLWithString:urlString];
-        request.qn_domain = serverHost;
-        request.qn_ip = nil;
-        toSkipDns = NO;
-    }
+    NSString *urlString = [NSString stringWithFormat:@"%@%@%@", scheme, serverHost, action ?: @""];
+    request.URL = [NSURL URLWithString:urlString];
     request.HTTPMethod = method;
     [request setAllHTTPHeaderFields:headers];
     [request setTimeoutInterval:self.config.timeoutInterval];
@@ -168,9 +160,16 @@ shouldRetry:(BOOL(^)(QNResponseInfo *responseInfo, NSDictionary *response))shoul
         
         [self.requestMetrics addMetricsList:metrics];
         
-        if (shouldRetry(responseInfo, response)
+        BOOL hijacked = metrics.lastObject.isMaybeHijacked || metrics.lastObject.isForsureHijacked;
+        BOOL isSafeDnsSource = kQNIsDnsSourceCustom(metrics.lastObject.syncDnsSource) || kQNIsDnsSourceDoh(metrics.lastObject.syncDnsSource) || kQNIsDnsSourceDnsPod(metrics.lastObject.syncDnsSource);
+        BOOL hijackedAndNeedRetry = hijacked && isSafeDnsSource;
+        if (hijackedAndNeedRetry) {
+            [self.region updateIpListFormHost:server.host];
+        }
+        
+        if ((shouldRetry(responseInfo, response)
             && self.config.allowBackupHost
-            && responseInfo.couldRegionRetry) {
+            && responseInfo.couldRegionRetry) || hijackedAndNeedRetry) {
             
             id <QNUploadServer> newServer = [self getNextServer:responseInfo];
             if (newServer) {
@@ -191,13 +190,13 @@ shouldRetry:(BOOL(^)(QNResponseInfo *responseInfo, NSDictionary *response))shoul
             [self complete:responseInfo response:response complete:complete];
         }
     }];
-    
 }
 
 - (void)complete:(QNResponseInfo *)responseInfo
         response:(NSDictionary *)response
         complete:(QNRegionRequestCompleteHandler)completionHandler {
-
+    [self.requestMetrics end];
+    
     if (completionHandler) {
         completionHandler(responseInfo, self.requestMetrics, response);
     }
