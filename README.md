@@ -14,16 +14,34 @@
 通过 CocoaPods
 
 ```ruby
-pod "Qiniu", "~> 8.2.0" 
+pod "Qiniu", "~> 8.4.2" 
+```
+
+通过 Swift Package Manager (Xcode 11+)
+```
+App 对接:
+File -> Swift Packages -> Add Package Dependency，输入库链接，选择相应版本即可
+库链接: https://github.com/qiniu/objc-sdk
+
+库对接:
+let package = Package(
+    dependencies: [
+        .package(url: "https://github.com/qiniu/objc-sdk", from: "8.4.2")
+    ],
+    // ...
+)
+
 ```
 
 ## 运行环境
 
 |               Qiniu SDK 版本               | 最低 iOS版本 | 最低 OS X 版本 |     Notes     |
 | :--------------------------------------: | :------: | :--------: | :-----------: |
-|                  8.2.x                   |  iOS 7   | OS X 10.14  | Xcode 最低版本 11 |
-|                  8.1.x                   |  iOS 7   | OS X 10.14  | Xcode 最低版本 11 |
-|                  8.0.x                   |  iOS 7   | OS X 10.14  | Xcode 最低版本 11 |
+|                  8.4.x                   |  iOS 7   | OS X 10.15  | Xcode 最低版本 11 |
+|                  8.3.x                   |  iOS 7   | OS X 10.15  | Xcode 最低版本 11 |
+|                  8.2.x                   |  iOS 7   | OS X 10.15  | Xcode 最低版本 11 |
+|                  8.1.x                   |  iOS 7   | OS X 10.15  | Xcode 最低版本 11 |
+|                  8.0.x                   |  iOS 7   | OS X 10.15  | Xcode 最低版本 11 |
 |                  7.5.x                   |  iOS 7   | OS X 10.9  | Xcode 最低版本 6. |
 |                  7.4.x                   |  iOS 7   | OS X 10.9  | Xcode 最低版本 6. |
 |                  7.3.x                   |  iOS 7   | OS X 10.9  | Xcode 最低版本 6. |

@@ -23,7 +23,11 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
 // 事务延后时间 单位：秒
 @property(nonatomic, assign)NSInteger after;
 // 事务执行时间 与事务管理者定时器时间相关联
-@property(nonatomic, assign)long long actionTime;
+@property(nonatomic, assign)double createTime;
+// 执行次数
+@property(nonatomic, assign)long executedCount;
+// 下次执行时的时间戳
+@property(nonatomic, assign)double nextExecutionTime;
 
 // 事务名称
 @property(nonatomic,  copy)NSString *name;
@@ -43,6 +47,9 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
     transaction.after = after;
     transaction.name = name;
     transaction.action = action;
+    transaction.executedCount = 0;
+    transaction.createTime = [[NSDate date] timeIntervalSince1970];
+    transaction.nextExecutionTime = transaction.createTime + after;
     return transaction;
 }
 
@@ -56,32 +63,43 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
     transaction.name = name;
     transaction.interval = interval;
     transaction.action = action;
+    transaction.executedCount = 0;
+    transaction.createTime = [[NSDate date] timeIntervalSince1970];
+    transaction.nextExecutionTime = transaction.createTime + after;
     return transaction;
 }
 
-- (BOOL)shouldAction:(long long)time{
-    if (time < self.actionTime) {
-        return NO;
+- (BOOL)shouldAction {
+    double currentTime = [[NSDate date] timeIntervalSince1970];
+    if (self.type == QNTransactionTypeNormal) {
+        return self.executedCount < 1 && currentTime >= self.nextExecutionTime;
+    } else if (self.type == QNTransactionTypeTime) {
+        return currentTime >= self.nextExecutionTime;
     } else {
-        return YES;
+        return NO;
     }
 }
 
-- (BOOL)maybeCompleted:(long long)time{
-    return [self shouldAction:time] && self.type == QNTransactionTypeNormal;
+- (BOOL)maybeCompleted {
+    if (self.type == QNTransactionTypeNormal) {
+        return self.executedCount > 0;
+    } else if (self.type == QNTransactionTypeTime) {
+        return false;
+    } else {
+        return false;
+    }
 }
 
-- (void)handleAction:(long long)time{
-    if (![self shouldAction:time]) {
+- (void)handleAction {
+    if (![self shouldAction]) {
         return;
     }
     if (self.action) {
+        _isExecuting = YES;
+        self.executedCount += 1;
+        self.nextExecutionTime = [[NSDate date] timeIntervalSince1970] + self.interval;
         self.action();
-    }
-    if (self.type == QNTransactionTypeNormal) {
-        self.actionTime = 0;
-    } else if(self.type == QNTransactionTypeTime) {
-        self.actionTime = time + self.interval;
+        _isExecuting = NO;
     }
 }
 
@@ -192,8 +210,6 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
 // 事务链表
 @property(nonatomic, strong)QNTransactionList *transactionList;
 
-// 定时器执行次数
-@property(nonatomic, assign)long long time;
 // 事务定时器
 @property(nonatomic, strong)NSTimer *timer;
 
@@ -210,7 +226,6 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
 }
 - (instancetype)init{
     if (self = [super init]) {
-        _time = 0;
         _transactionList = [[QNTransactionList alloc] init];
     }
     return self;
@@ -233,9 +248,7 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
     if (transaction == nil) {
         return;
     }
-    transaction.actionTime = self.time + transaction.after;
     [self.transactionList add:transaction];
-    
     [self createThread];
 }
 
@@ -254,7 +267,7 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
         if (![self.transactionList has:transaction]) {
             [self.transactionList add:transaction];
         }
-        transaction.actionTime = self.time;
+        transaction.createTime = [[NSDate date] timeIntervalSince1970] - transaction.interval;
     }
 }
 
@@ -275,14 +288,14 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
     
     [self.transactionList enumerate:^(QNTransaction *transaction, BOOL * _Nonnull stop) {
         [self handleTransaction:transaction];
-        if ([transaction maybeCompleted:self.time]) {
+        if ([transaction maybeCompleted]) {
             [self removeTransaction:transaction];
         }
     }];
 }
 
 - (void)handleTransaction:(QNTransaction *)transaction{
-    [transaction handleAction:self.time];
+    [transaction handleAction];
 }
 
 //MARK: -- thread
@@ -334,7 +347,6 @@ typedef NS_ENUM(NSInteger, QNTransactionType){
 }
 
 - (void)timerAction{
-    self.time += 1;
     [self handleAllTransaction];
 }
 
