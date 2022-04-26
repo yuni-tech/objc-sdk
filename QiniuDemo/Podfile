@@ -1,9 +1,9 @@
 source 'https://github.com/CocoaPods/Specs.git'
 
 target "QiniuDemo" do
-  platform :ios, "7.0"
+  platform :ios, "10.0"
 
-#  pod 'Qiniu', '~> 8.1.1'
+#  pod 'Qiniu', '~> 8.3.2'
   pod 'Qiniu',:path => '../'
 end
 

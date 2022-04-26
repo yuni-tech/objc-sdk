@@ -9,10 +9,10 @@
 #import "QNUploadSystemClient.h"
 #import "QNUserAgent.h"
 #import "NSURLRequest+QNRequest.h"
-#import "QNURLProtocol.h"
 
 @interface QNUploadSystemClient()<NSURLSessionDelegate>
 
+@property(nonatomic, strong)NSURLRequest *request;
 @property(nonatomic, strong)QNUploadSingleRequestMetrics *requestMetrics;
 @property(nonatomic, strong)NSURLSessionDataTask *uploadTask;
 @property(nonatomic, strong)NSMutableData *responseData;
@@ -22,27 +22,45 @@
 @end
 @implementation QNUploadSystemClient
 
+- (NSString *)clientId {
+    return @"NSURLSession";
+}
+
 - (void)request:(NSURLRequest *)request
+         server:(id <QNUploadServer>)server
 connectionProxy:(NSDictionary *)connectionProxy
        progress:(void (^)(long long, long long))progress
        complete:(QNRequestClientCompleteHandler)complete {
     
+    // 非 https 方可使用 IP
+    if (!request.qn_isHttps && server && server.ip.length > 0 && server.host.length > 0) {
+        NSString *urlString = request.URL.absoluteString;
+        urlString = [urlString stringByReplacingOccurrencesOfString:server.host withString:server.ip];
+        NSMutableURLRequest *requestNew = [request mutableCopy];
+        requestNew.URL = [NSURL URLWithString:urlString];
+        requestNew.qn_domain = server.host;
+        self.request = [requestNew copy];
+    } else {
+        self.request = request;
+    }
+
     self.requestMetrics = [QNUploadSingleRequestMetrics emptyMetrics];
-    self.requestMetrics.remoteAddress = request.qn_ip;
-    self.requestMetrics.startDate = [NSDate date];
+    self.requestMetrics.remoteAddress = self.request.qn_isHttps ? nil : server.ip;
+    self.requestMetrics.remotePort = self.request.qn_isHttps ? @443 : @80;
+    [self.requestMetrics start];
     
     self.responseData = [NSMutableData data];
     self.progress = progress;
     self.complete = complete;
     
-    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration qn_sessionConfiguration];
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
     if (connectionProxy) {
         configuration.connectionProxyDictionary = connectionProxy;
     }
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
                                                           delegate:self
                                                      delegateQueue:nil];
-    NSURLSessionDataTask *uploadTask = [session dataTaskWithRequest:request];
+    NSURLSessionDataTask *uploadTask = [session dataTaskWithRequest:self.request];
     [uploadTask resume];
     
     self.uploadTask = uploadTask;
@@ -62,12 +80,10 @@ connectionProxy:(NSDictionary *)connectionProxy
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(nullable NSError *)error {
-    self.requestMetrics.endDate = [NSDate date];
+    [self.requestMetrics end];
     self.requestMetrics.request = task.currentRequest;
     self.requestMetrics.response = task.response;
     self.requestMetrics.error = error;
-    self.requestMetrics.countOfResponseBodyBytesReceived = task.response.expectedContentLength;
-    self.requestMetrics.countOfRequestHeaderBytesSent = [NSString stringWithFormat:@"%@", task.currentRequest.allHTTPHeaderFields].length;
     self.complete(task.response, self.requestMetrics,self.responseData, error);
     
     [session finishTasksAndInvalidate];
@@ -101,11 +117,20 @@ connectionProxy:(NSDictionary *)connectionProxy
     }
     
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 130000
-    if (@available(iOS 13.0, *)) {
-        self.requestMetrics.localAddress = transactionMetrics.localAddress;
-        self.requestMetrics.localPort = transactionMetrics.localPort;
-        self.requestMetrics.remoteAddress = transactionMetrics.remoteAddress;
-        self.requestMetrics.remotePort = transactionMetrics.remotePort;
+    if (@available(iOS 13.0, macOS 10.15, *)) {
+        if (transactionMetrics.remoteAddress) {
+            self.requestMetrics.remoteAddress = transactionMetrics.remoteAddress;
+            self.requestMetrics.remotePort = transactionMetrics.remotePort;
+        }
+        if (transactionMetrics.countOfRequestHeaderBytesSent > 0) {
+            self.requestMetrics.countOfRequestHeaderBytesSent = transactionMetrics.countOfRequestHeaderBytesSent;
+        }
+        if (transactionMetrics.countOfResponseHeaderBytesReceived > 0) {
+            self.requestMetrics.countOfResponseHeaderBytesReceived = transactionMetrics.countOfResponseHeaderBytesReceived;
+        }
+        if (transactionMetrics.countOfResponseBodyBytesReceived > 0) {
+            self.requestMetrics.countOfResponseBodyBytesReceived = transactionMetrics.countOfResponseBodyBytesReceived;
+        }
     }
 #endif
     
@@ -122,4 +147,56 @@ connectionProxy:(NSDictionary *)connectionProxy
     }
 }
 
+/*
+- (BOOL)evaluateServerTrust:(SecTrustRef)serverTrust
+                  forDomain:(NSString *)domain {
+
+    NSMutableArray *policies = [NSMutableArray array];
+    if (domain) {
+        [policies addObject:(__bridge_transfer id)SecPolicyCreateSSL(true, (__bridge CFStringRef)domain)];
+    } else {
+        [policies addObject:(__bridge_transfer id)SecPolicyCreateBasicX509()];
+    }
+    
+    SecTrustSetPolicies(serverTrust, (__bridge CFArrayRef)policies);
+
+    if (@available(iOS 13.0, macOS 10.14, *)) {
+        CFErrorRef error = NULL;
+        BOOL ret = SecTrustEvaluateWithError(serverTrust, &error);
+        return ret && (error == nil);
+    } else {
+        SecTrustResultType result;
+        SecTrustEvaluate(serverTrust, &result);
+        return (result == kSecTrustResultUnspecified || result == kSecTrustResultProceed);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+ completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition disposition, NSURLCredential * __nullable credential))completionHandler {
+    if (!challenge) {
+        return;
+    }
+    NSURLSessionAuthChallengeDisposition disposition = NSURLSessionAuthChallengePerformDefaultHandling;
+    NSURLCredential *credential = nil;
+
+    NSString* host = [[self.request allHTTPHeaderFields] objectForKey:@"host"];
+    if (!host) {
+        host = self.request.URL.host;
+    }
+    if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        if ([self evaluateServerTrust:challenge.protectionSpace.serverTrust forDomain:host]) {
+            disposition = NSURLSessionAuthChallengeUseCredential;
+            credential = [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust];
+        } else {
+            disposition = NSURLSessionAuthChallengePerformDefaultHandling;
+        }
+    } else {
+        disposition = NSURLSessionAuthChallengePerformDefaultHandling;
+    }
+
+    completionHandler(disposition,credential);
+}
+*/
 @end

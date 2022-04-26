@@ -30,6 +30,8 @@
 #import <CoreServices/CoreServices.h>
 #endif
 
+#import "QNUploadManager.h"
+
 #import "QNAsyncRun.h"
 #import "QNConfiguration.h"
 #import "QNCrc32.h"
@@ -45,8 +47,12 @@
 #import "QNUploadOption.h"
 #import "QNReportItem.h"
 
+#import "QNServerConfigMonitor.h"
 #import "QNDnsPrefetch.h"
 #import "QNZone.h"
+
+#import "QNUploadSourceFile.h"
+#import "QNUploadSourceStream.h"
 
 @interface QNUploadManager ()
 @property (nonatomic) QNConfiguration *config;
@@ -79,6 +85,7 @@
         }
         _config = config;
         [[QNTransactionManager shared] addDnsLocalLoadTransaction];
+        [QNServerConfigMonitor startMonitor];
     }
     return self;
 }
@@ -120,6 +127,7 @@
         [QNUploadManager complete:token
                               key:key
                          delegate:self.config.delegate
+                           source:data
                      responseInfo:info
                          response:nil
                       taskMetrics:nil
@@ -127,12 +135,14 @@
         return;
     }
     
+    QNServerConfigMonitor.token = token;
     [[QNTransactionManager shared] addDnsCheckAndPrefetchTransaction:self.config.zone token:t];
     
     QNUpTaskCompletionHandler complete = ^(QNResponseInfo *info, NSString *key, QNUploadTaskMetrics *metrics, NSDictionary *resp) {
         [QNUploadManager complete:token
                               key:key
                          delegate:self.config.delegate
+                           source:data
                      responseInfo:info
                          response:resp
                       taskMetrics:metrics
@@ -150,98 +160,22 @@
     });
 }
 
-- (void)putFileInternal:(id<QNFileDelegate>)file
-                    key:(NSString *)key
-                  token:(NSString *)token
-               complete:(QNUpCompletionHandler)completionHandler
-                 option:(QNUploadOption *)option {
+- (void)putInputStream:(NSInputStream *)inputStream
+              sourceId:(NSString *)sourceId
+                  size:(long long)size
+              fileName:(NSString *)fileName
+                   key:(NSString *)key
+                 token:(NSString *)token
+              complete:(QNUpCompletionHandler)completionHandler
+                option:(QNUploadOption *)option {
     
+    if ([QNUploadManager checkAndNotifyError:key token:token input:inputStream delegate:self.config.delegate complete:completionHandler]) {
+        return;
+    }
+
     @autoreleasepool {
-        QNUpToken *t = [QNUpToken parse:token];
-        if (t == nil || ![t isValid]) {
-            QNResponseInfo *info = [QNResponseInfo responseInfoWithInvalidToken:@"invalid token"];
-            [QNUploadManager complete:token
-                                  key:key
-                             delegate:self.config.delegate
-                         responseInfo:info
-                             response:nil
-                          taskMetrics:nil
-                             complete:completionHandler];
-            return;
-        }
-
-
-        QNUpTaskCompletionHandler complete = ^(QNResponseInfo *info, NSString *key, QNUploadTaskMetrics *metrics, NSDictionary *resp) {
-            [file close];
-            [QNUploadManager complete:token
-                                  key:key
-                             delegate:self.config.delegate
-                         responseInfo:info
-                             response:resp
-                          taskMetrics:metrics
-                             complete:completionHandler];
-        };
-
-        [[QNTransactionManager shared] addDnsCheckAndPrefetchTransaction:self.config.zone token:t];
-
-        if ([file size] <= self.config.putThreshold) {
-            NSError *error;
-            NSData *data = [file readAllWithError:&error];
-            [file close];
-            if (error) {
-                QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
-                [QNUploadManager complete:token
-                                      key:key
-                                 delegate:self.config.delegate
-                             responseInfo:info
-                                 response:nil
-                              taskMetrics:nil
-                                 complete:completionHandler];
-                return;
-            }
-            
-            NSString *fileName = [[file path] lastPathComponent];
-            [self putData:data
-                 fileName:fileName
-                      key:key
-                    token:token
-                 complete:completionHandler
-                   option:option];
-            return;
-        }
-
-        NSString *recorderKey = key;
-        if (self.config.recorder != nil && self.config.recorderKeyGen != nil) {
-            recorderKey = self.config.recorderKeyGen(key, [file path]);
-        }
-        
-        if (self.config.useConcurrentResumeUpload) {
-            QNConcurrentResumeUpload *up = [[QNConcurrentResumeUpload alloc]
-                                            initWithFile:file
-                                            key:key
-                                            token:t
-                                            option:option
-                                            configuration:self.config
-                                            recorder:self.config.recorder
-                                            recorderKey:key
-                                            completionHandler:complete];
-            QNAsyncRun(^{
-                [up run];
-            });
-        } else {
-            QNPartsUpload *up = [[QNPartsUpload alloc]
-                                 initWithFile:file
-                                 key:key
-                                 token:t
-                                 option:option
-                                 configuration:self.config
-                                 recorder:self.config.recorder
-                                 recorderKey:key
-                                 completionHandler:complete];
-            QNAsyncRun(^{
-                [up run];
-            });
-        }
+        QNUploadSourceStream *source = [QNUploadSourceStream stream:inputStream sourceId:sourceId size:size fileName:fileName];
+        [self putInternal:source key:key token:token complete:completionHandler option:option];
     }
 }
 
@@ -263,6 +197,7 @@
             [QNUploadManager complete:token
                                   key:key
                              delegate:self.config.delegate
+                               source:nil
                          responseInfo:info
                              response:nil
                           taskMetrics:nil
@@ -293,6 +228,7 @@
             [QNUploadManager complete:token
                                   key:key
                              delegate:self.config.delegate
+                               source:nil
                          responseInfo:info
                              response:nil
                           taskMetrics:nil
@@ -324,6 +260,7 @@
             [QNUploadManager complete:token
                                   key:key
                              delegate:self.config.delegate
+                               source:nil
                          responseInfo:info
                              response:nil
                           taskMetrics:nil
@@ -353,6 +290,7 @@
             [QNUploadManager complete:token
                                   key:key
                              delegate:self.config.delegate
+                               source:nil
                          responseInfo:info
                              response:nil
                           taskMetrics:nil
@@ -362,6 +300,115 @@
         [self putFileInternal:file key:key token:token complete:completionHandler option:option];
     }
 #endif
+}
+
+- (void)putFileInternal:(id<QNFileDelegate>)file
+                    key:(NSString *)key
+                  token:(NSString *)token
+               complete:(QNUpCompletionHandler)completionHandler
+                 option:(QNUploadOption *)option {
+    [self putInternal:[QNUploadSourceFile file:file]
+                  key:key token:token
+             complete:completionHandler
+               option:option];
+}
+
+- (void)putInternal:(id<QNUploadSource>)source
+                key:(NSString *)key
+              token:(NSString *)token
+           complete:(QNUpCompletionHandler)completionHandler
+             option:(QNUploadOption *)option {
+    
+    @autoreleasepool {
+        QNUpToken *t = [QNUpToken parse:token];
+        if (t == nil || ![t isValid]) {
+            QNResponseInfo *info = [QNResponseInfo responseInfoWithInvalidToken:@"invalid token"];
+            [QNUploadManager complete:token
+                                  key:key
+                             delegate:self.config.delegate
+                               source:source
+                         responseInfo:info
+                             response:nil
+                          taskMetrics:nil
+                             complete:completionHandler];
+            return;
+        }
+
+
+        QNUpTaskCompletionHandler complete = ^(QNResponseInfo *info, NSString *key, QNUploadTaskMetrics *metrics, NSDictionary *resp) {
+            [QNUploadManager complete:token
+                                  key:key
+                             delegate:self.config.delegate
+                               source:source
+                         responseInfo:info
+                             response:resp
+                          taskMetrics:metrics
+                             complete:completionHandler];
+        };
+
+        QNServerConfigMonitor.token = token;
+        [[QNTransactionManager shared] addDnsCheckAndPrefetchTransaction:self.config.zone token:t];
+
+        long long sourceSize = [source getSize];
+        if (sourceSize > 0 && sourceSize <= self.config.putThreshold) {
+            NSError *error;
+            NSData *data = [source readData:(NSInteger)sourceSize dataOffset:0 error:&error];
+            [source close];
+            if (error) {
+                QNResponseInfo *info = [QNResponseInfo responseInfoWithFileError:error];
+                [QNUploadManager complete:token
+                                      key:key
+                                 delegate:self.config.delegate
+                                   source:source
+                             responseInfo:info
+                                 response:nil
+                              taskMetrics:nil
+                                 complete:completionHandler];
+                return;
+            }
+            
+            [self putData:data
+                 fileName:[source getFileName]
+                      key:key
+                    token:token
+                 complete:completionHandler
+                   option:option];
+            return;
+        }
+
+        NSString *recorderKey = key;
+        if (self.config.recorder != nil && self.config.recorderKeyGen != nil) {
+            recorderKey = self.config.recorderKeyGen(key, [source getId]);
+        }
+        
+        if (self.config.useConcurrentResumeUpload) {
+            QNConcurrentResumeUpload *up = [[QNConcurrentResumeUpload alloc]
+                                            initWithSource:source
+                                            key:key
+                                            token:t
+                                            option:option
+                                            configuration:self.config
+                                            recorder:self.config.recorder
+                                            recorderKey:recorderKey
+                                            completionHandler:complete];
+            QNAsyncRun(^{
+                [up run];
+            });
+        } else {
+            QNPartsUpload *up = [[QNPartsUpload alloc]
+                                 initWithSource:source
+                                 key:key
+                                 token:t
+                                 option:option
+                                 configuration:self.config
+                                 recorder:self.config.recorder
+                                 recorderKey:recorderKey
+                                 completionHandler:complete];
+            QNAsyncRun(^{
+                [up run];
+            });
+        }
+    }
 }
 
 + (BOOL)checkAndNotifyError:(NSString *)key
@@ -388,6 +435,7 @@
         [QNUploadManager complete:token
                               key:key
                          delegate:delegate
+                           source:nil
                      responseInfo:info
                          response:nil
                       taskMetrics:nil
@@ -401,12 +449,13 @@
 + (void)complete:(NSString *)token
              key:(NSString *)key
         delegate:(id<QNUploadDelegate>)delegate
+          source:(NSObject *)source
     responseInfo:(QNResponseInfo *)responseInfo
         response:(NSDictionary *)response
      taskMetrics:(QNUploadTaskMetrics *)taskMetrics
         complete:(QNUpCompletionHandler)completionHandler {
-
-    [QNUploadManager reportQuality:key responseInfo:responseInfo taskMetrics:taskMetrics token:token];
+    
+    [QNUploadManager reportQuality:key source:source responseInfo:responseInfo taskMetrics:taskMetrics token:token];
     
     QNAsyncRunInMain(^{
         if (delegate && [delegate respondsToSelector:@selector(QNUploadDataDidFinish:key:resp:)]) {
@@ -421,6 +470,7 @@
 
 //MARK:-- 统计quality日志
 + (void)reportQuality:(NSString *)key
+               source:(NSObject *)source
          responseInfo:(QNResponseInfo *)responseInfo
           taskMetrics:(QNUploadTaskMetrics *)taskMetrics
                 token:(NSString *)token{
@@ -430,12 +480,13 @@
     
     QNReportItem *item = [QNReportItem item];
     [item setReportValue:QNReportLogTypeQuality forKey:QNReportQualityKeyLogType];
+    [item setReportValue:taskMetricsP.upType forKey:QNReportQualityKeyUpType];
     [item setReportValue:@([[NSDate date] timeIntervalSince1970]) forKey:QNReportQualityKeyUpTime];
     [item setReportValue:responseInfo.qualityResult forKey:QNReportQualityKeyResult];
     [item setReportValue:upToken.bucket forKey:QNReportQualityKeyTargetBucket];
     [item setReportValue:key forKey:QNReportQualityKeyTargetKey];
     [item setReportValue:taskMetricsP.totalElapsedTime forKey:QNReportQualityKeyTotalElapsedTime];
-    [item setReportValue:taskMetricsP.totalElapsedTime forKey:QNReportQualityKeyTotalElapsedTime];
+    [item setReportValue:taskMetricsP.ucQueryMetrics.totalElapsedTime forKey:QNReportQualityKeyUcQueryElapsedTime];
     [item setReportValue:taskMetricsP.requestCount forKey:QNReportQualityKeyRequestsCount];
     [item setReportValue:taskMetricsP.regionCount forKey:QNReportQualityKeyRegionsCount];
     [item setReportValue:taskMetricsP.bytesSend forKey:QNReportQualityKeyBytesSent];
@@ -448,6 +499,20 @@
     [item setReportValue:responseInfo.requestReportErrorType forKey:QNReportQualityKeyErrorType];
     NSString *errorDesc = responseInfo.requestReportErrorType ? responseInfo.message : nil;
     [item setReportValue:errorDesc forKey:QNReportQualityKeyErrorDescription];
+    
+    [item setReportValue:taskMetricsP.lastMetrics.lastMetrics.hijacked forKey:QNReportBlockKeyHijacking];
+    
+    long long fileSize = -1;
+    if ([source conformsToProtocol:@protocol(QNUploadSource)]) {
+        fileSize = [(id <QNUploadSource>)source getSize];
+    } else if ([source isKindOfClass:[NSData class]]) {
+        fileSize = [(NSData *)source length];
+    }
+    [item setReportValue:@(fileSize) forKey:QNReportQualityKeyFileSize];
+    if (responseInfo.isOK && fileSize > 0 && taskMetrics.totalElapsedTime) {
+        NSNumber *speed = [QNUtils calculateSpeed:fileSize totalTime:taskMetrics.totalElapsedTime.longLongValue];
+        [item setReportValue:speed forKey:QNReportQualityKeyPerceptiveSpeed];
+    }
     
     [kQNReporter reportItem:item token:token];
 }

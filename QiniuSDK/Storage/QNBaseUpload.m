@@ -12,6 +12,10 @@
 #import "QNBaseUpload.h"
 #import "QNUploadDomainRegion.h"
 
+NSString *const QNUploadUpTypeForm = @"form";
+NSString *const QNUploadUpTypeResumableV1 = @"resumable_v1";
+NSString *const QNUploadUpTypeResumableV2 = @"resumable_v2";
+
 @interface QNBaseUpload ()
 
 @property (nonatomic, strong) QNBaseUpload *strongSelf;
@@ -19,7 +23,7 @@
 @property (nonatomic,   copy) NSString *key;
 @property (nonatomic,   copy) NSString *fileName;
 @property (nonatomic, strong) NSData *data;
-@property (nonatomic, strong) id <QNFileDelegate> file;
+@property (nonatomic, strong) id <QNUploadSource> uploadSource;
 @property (nonatomic, strong) QNUpToken *token;
 @property (nonatomic,   copy) NSString *identifier;
 @property (nonatomic, strong) QNUploadOption *option;
@@ -32,20 +36,21 @@
 @property (nonatomic, strong)NSMutableArray <id <QNUploadRegion> > *regions;
 
 @property (nonatomic, strong)QNUploadRegionRequestMetrics *currentRegionRequestMetrics;
+@property (nonatomic, strong) QNUploadTaskMetrics *metrics;
 
 @end
 
 @implementation QNBaseUpload
 
-- (instancetype)initWithFile:(id<QNFileDelegate>)file
-                         key:(NSString *)key
-                       token:(QNUpToken *)token
-                      option:(QNUploadOption *)option
-               configuration:(QNConfiguration *)config
-                    recorder:(id<QNRecorderDelegate>)recorder
-                 recorderKey:(NSString *)recorderKey
-           completionHandler:(QNUpTaskCompletionHandler)completionHandler{
-    return [self initWithFile:file data:nil fileName:[[file path] lastPathComponent] key:key token:token option:option configuration:config recorder:recorder recorderKey:recorderKey completionHandler:completionHandler];
+- (instancetype)initWithSource:(id<QNUploadSource>)uploadSource
+                           key:(NSString *)key
+                         token:(QNUpToken *)token
+                        option:(QNUploadOption *)option
+                 configuration:(QNConfiguration *)config
+                      recorder:(id<QNRecorderDelegate>)recorder
+                   recorderKey:(NSString *)recorderKey
+             completionHandler:(QNUpTaskCompletionHandler)completionHandler{
+    return [self initWithSource:uploadSource data:nil fileName:[uploadSource getFileName] key:key token:token option:option configuration:config recorder:recorder recorderKey:recorderKey completionHandler:completionHandler];
 }
 
 - (instancetype)initWithData:(NSData *)data
@@ -55,21 +60,21 @@
                       option:(QNUploadOption *)option
                configuration:(QNConfiguration *)config
            completionHandler:(QNUpTaskCompletionHandler)completionHandler{
-    return [self initWithFile:nil data:data fileName:fileName key:key token:token option:option configuration:config recorder:nil recorderKey:nil completionHandler:completionHandler];
+    return [self initWithSource:nil data:data fileName:fileName key:key token:token option:option configuration:config recorder:nil recorderKey:nil completionHandler:completionHandler];
 }
 
-- (instancetype)initWithFile:(id<QNFileDelegate>)file
-                        data:(NSData *)data
-                    fileName:(NSString *)fileName
-                         key:(NSString *)key
-                       token:(QNUpToken *)token
-                      option:(QNUploadOption *)option
-               configuration:(QNConfiguration *)config
-                    recorder:(id<QNRecorderDelegate>)recorder
-                 recorderKey:(NSString *)recorderKey
-           completionHandler:(QNUpTaskCompletionHandler)completionHandler{
+- (instancetype)initWithSource:(id<QNUploadSource>)uploadSource
+                          data:(NSData *)data
+                      fileName:(NSString *)fileName
+                           key:(NSString *)key
+                         token:(QNUpToken *)token
+                        option:(QNUploadOption *)option
+                 configuration:(QNConfiguration *)config
+                      recorder:(id<QNRecorderDelegate>)recorder
+                   recorderKey:(NSString *)recorderKey
+             completionHandler:(QNUpTaskCompletionHandler)completionHandler{
     if (self = [super init]) {
-        _file = file;
+        _uploadSource = uploadSource;
         _data = data;
         _fileName = fileName ?: @"?";
         _key = key;
@@ -94,14 +99,16 @@
 - (void)initData{
     _strongSelf = self;
     _currentRegionIndex = 0;
-    _metrics = [QNUploadTaskMetrics emptyMetrics];
 }
 
 - (void)run {
+    [self.metrics start];
+    
     kQNWeakSelf;
     [_config.zone preQuery:self.token on:^(int code, QNResponseInfo *responseInfo, QNUploadRegionRequestMetrics *metrics) {
         kQNStrongSelf;
-        [self.metrics addMetrics:metrics];
+        self.metrics.ucQueryMetrics = metrics;
+        
         if (code == 0) {
             int prepareCode = [self prepareToUpload];
             if (prepareCode == 0) {
@@ -125,13 +132,17 @@
 }
 
 - (void)startToUpload{
+    self.currentRegionRequestMetrics = [[QNUploadRegionRequestMetrics alloc] initWithRegion:[self getCurrentRegion]];
+    [self.currentRegionRequestMetrics start];
 }
 
 - (BOOL)switchRegionAndUpload{
     if (self.currentRegionRequestMetrics) {
+        [self.currentRegionRequestMetrics end];
         [self.metrics addMetrics:self.currentRegionRequestMetrics];
         self.currentRegionRequestMetrics = nil;
     }
+    
     BOOL isSwitched = [self switchRegion];
     if (isSwitched) {
         [self startToUpload];
@@ -152,6 +163,10 @@
 
 - (void)complete:(QNResponseInfo *)info
         response:(NSDictionary *)response{
+    
+    [self.metrics end];
+    [self.currentRegionRequestMetrics end];
+    
     if (self.currentRegionRequestMetrics) {
         [self.metrics addMetrics:self.currentRegionRequestMetrics];
     }
@@ -231,4 +246,10 @@
     [self.currentRegionRequestMetrics addMetrics:metrics];
 }
 
+- (QNUploadTaskMetrics *)metrics {
+    if (_metrics == nil) {
+        _metrics = [QNUploadTaskMetrics taskMetrics:self.upType];
+    }
+    return _metrics;
+}
 @end

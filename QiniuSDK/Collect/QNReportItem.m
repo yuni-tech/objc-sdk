@@ -110,15 +110,14 @@
         errorType = @"cannot_connect_to_host";
     } else if (self.statusCode == -1005 || self.statusCode == -1021){
         errorType = @"transmission_error";
-    } else if (self.statusCode == -1200 || self.statusCode == -1201 || self.statusCode == -1202
-               || self.statusCode == -1203 || self.statusCode == -1204 || self.statusCode == -1205
-               || self.statusCode == -1206 || self.statusCode == -9807){
+    } else if ((self.statusCode <= -1200 && self.statusCode >= -1206) || self.statusCode == -2000 || self.statusCode == -9807){
         errorType = @"ssl_error";
     } else if (self.statusCode == -1015 || self.statusCode == -1016 || self.statusCode == -1017){
         errorType = @"parse_error";
     } else if (self.statusCode == -1007 || self.statusCode == -1010 || self.statusCode == kQNMaliciousResponseError){
         errorType = @"malicious_response";
-    } else if (self.statusCode > -1130 && self.statusCode <= -1100){
+    } else if (self.statusCode == kQNUnexpectedSysCallError
+               || (self.statusCode > -1130 && self.statusCode <= -1010)){
         errorType = @"unexpected_syscall_error";
     } else if (self.statusCode == kQNRequestCancelled
                || self.statusCode == NSURLErrorCancelled){
@@ -167,7 +166,7 @@ NSString * const QNReportLogTypeQuality = @"quality";
 
 //MARK:-- 请求信息打点⽇志
 NSString * const QNReportRequestKeyLogType = @"log_type";
-NSString *const QNReportRequestKeyUpTime = @"up_time";
+NSString * const QNReportRequestKeyUpTime = @"up_time";
 NSString * const QNReportRequestKeyStatusCode = @"status_code";
 NSString * const QNReportRequestKeyRequestId = @"req_id";
 NSString * const QNReportRequestKeyHost = @"host";
@@ -202,9 +201,13 @@ NSString * const QNReportRequestKeyHttpClient = @"http_client";
 NSString * const QNReportRequestKeyNetworkType = @"network_type";
 NSString * const QNReportRequestKeySignalStrength = @"signal_strength";
 NSString * const QNReportRequestKeyPrefetchedDnsSource = @"prefetched_dns_source";
+NSString * const QNReportRequestKeyDnsSource = @"dns_source";
+NSString * const QNReportRequestKeyDnsErrorMessage = @"dns_error_message";
 NSString * const QNReportRequestKeyPrefetchedBefore = @"prefetched_before";
 NSString * const QNReportRequestKeyPrefetchedErrorMessage = @"prefetched_error_message";
 NSString * const QNReportRequestKeyNetworkMeasuring = @"network_measuring";
+NSString * const QNReportRequestKeyPerceptiveSpeed = @"perceptive_speed";
+NSString * const QNReportRequestKeyHijacking = @"hijacking";
 
 //MARK:-- 分块上传统计⽇志
 NSString * const QNReportBlockKeyLogType = @"log_type";
@@ -225,18 +228,23 @@ NSString * const QNReportBlockKeyOsName = @"os_name";
 NSString * const QNReportBlockKeyOsVersion = @"os_version";
 NSString * const QNReportBlockKeySDKName = @"sdk_name";
 NSString * const QNReportBlockKeySDKVersion = @"sdk_version";
+NSString * const QNReportBlockKeyPerceptiveSpeed = @"perceptive_speed";
+NSString * const QNReportBlockKeyHijacking = @"hijacking";
 
 
 //MARK:-- 上传质量统计
 NSString * const QNReportQualityKeyLogType = @"log_type";
+NSString * const QNReportQualityKeyUpType = @"up_type";
 NSString * const QNReportQualityKeyUpTime = @"up_time";
 NSString * const QNReportQualityKeyResult = @"result";
 NSString * const QNReportQualityKeyTargetBucket = @"target_bucket";
 NSString * const QNReportQualityKeyTargetKey = @"target_key";
 NSString * const QNReportQualityKeyTotalElapsedTime = @"total_elapsed_time";
+NSString * const QNReportQualityKeyUcQueryElapsedTime = @"uc_query_elapsed_time";
 NSString * const QNReportQualityKeyRequestsCount = @"requests_count";
 NSString * const QNReportQualityKeyRegionsCount = @"regions_count";
 NSString * const QNReportQualityKeyBytesSent = @"bytes_sent";
+NSString * const QNReportQualityKeyFileSize = @"file_size";
 NSString * const QNReportQualityKeyCloudType = @"cloud_type";
 NSString * const QNReportQualityKeyErrorType = @"error_type";
 NSString * const QNReportQualityKeyErrorDescription = @"error_description";
@@ -244,3 +252,5 @@ NSString * const QNReportQualityKeyOsName = @"os_name";
 NSString * const QNReportQualityKeyOsVersion = @"os_version";
 NSString * const QNReportQualityKeySDKName = @"sdk_name";
 NSString * const QNReportQualityKeySDKVersion = @"sdk_version";
+NSString * const QNReportQualityKeyPerceptiveSpeed = @"perceptive_speed";
+NSString * const QNReportQualityKeyHijacking = @"hijacking";
